@@ -1,16 +1,27 @@
+install.packages("glmnet", repos = "http://cran.us.r-project.org")
+library(glmnet)
 library(cvTools)
 library(tidyverse)
 library(tibble)
 library(GGally)
 library(plotly)
+library(ggplot2)
+library(rlang)
+library(mosaicData)
+library(cvTools)
+library(GGally)
+library(caret)
+options(scipen = 999, digits = 5)
+library(stringr)
+
 
 setwd("/Users/tylercoleman/Desktop/")
 
 # Loading the data: 22 Observations for each play, from each player perspective
-NFL_DATA <- read.csv(file = "train.csv", header = TRUE, sep=",")
+NFL_DATA <- read.csv(file = "train.csv", header = TRUE, sep=",", na.strings=c("","NA"))
 View(NFL_DATA)
 
-# We only want from the position of the running back as info about other players is captured
+# We only want from the position of the running player as info about other players is captured in df
 NFL_DATA_Run_Observations <- NFL_DATA[(NFL_DATA$NflIdRusher == NFL_DATA$NflId), ]
 View(NFL_DATA_Run_Observations)
 
@@ -21,6 +32,9 @@ training_data = sample(nrow(NFL_DATA_Run_Observations), size = nrow(NFL_DATA_Run
 NFL_DATA_Train = NFL_DATA_Run_Observations[training_data, ] 
 NFL_DATA_Holdout = NFL_DATA_Run_Observations[-training_data, ] # holdout is remaining indices
 View(NFL_DATA_Train) 
+
+
+# DATA EXPLORATION
 
 # Explore distribution of the continuos response variable we are predicting. (Yards/carry)
 ggplot(data = NFL_DATA_Train) + 
@@ -93,7 +107,8 @@ plot_ly(
 NFL_DATA_Train$OffenseFormation = factor(NFL_DATA_Train$OffenseFormation)
 NFL_DATA_Train$DefendersInTheBox = factor(NFL_DATA_Train$DefendersInTheBox)
 
-# Plot 3d of offense formation and defenders in box, and yards gotten
+# Plot 3d of offense formation and defenders in box, and yards gotten. More defenders, less yards
+# Might be ok, might only need 2 yards, same for 4th down
 plot_ly(
   NFL_DATA_Train, x = ~OffenseFormation, y = ~DefendersInTheBox, z = ~Yards, color = ~PossessionTeam) %>%
   add_markers() %>%
@@ -103,15 +118,102 @@ plot_ly(
                  zaxis = list(title = 'Yards'))
 )
 
+# DATA MANIPULATION AND CLEANING
 
+# Adding the covariates that we want to include, and modififying the dataframe 
 
+# Make Copy so I can add new covariates
 
+NFL_DATA_TRAIN_Modified <- NFL_DATA_Train
+# View(NFL_DATA_TRAIN_Modified)
 
-# Mutations 
+# Function to take the difference in time from the dataframe
+timeDifference <- function(time) {
+  num <- gsub("[:]", "" , str_sub(time, 12, 19), perl=TRUE)
+  hr <- ifelse(str_sub(num, 1, 2) == "00", 24, as.numeric(str_sub(num, 1, 2)))
+  min <- as.numeric(str_sub(num, 3, 4))
+  sec <- as.numeric(str_sub(num, 5, 6))
+  newTime <- 3600*hr + 60 * min + sec
+  return(newTime)
+}
+
+# Add Time_Difference between the snap and the handoff
+NFL_DATA_TRAIN_Modified$TimeDifference <- 
+  timeDifference(NFL_DATA_TRAIN_Modified$TimeHandoff) - timeDifference(NFL_DATA_TRAIN_Modified$TimeSnap)
+
+# Add the Difference in Score by home score - visitor score
 # Difference in Score (Pair with which team is winning (HomeScore-AwayScore))
-# Difference in time between snap and handoff (Done)
-# What team is on defense
-# Age
+NFL_DATA_TRAIN_Modified$HomeScoreAdvantage <- 
+  NFL_DATA_TRAIN_Modified$HomeScoreBeforePlay - NFL_DATA_TRAIN_Modified$VisitorScoreBeforePlay
+
+
+# Add the Team that is on defense (Yards allowed)
+
+#if home team has the ball, then the visitor is playing defense.
+#if home team does not have the ball, then the home team is playing defense. 
+NFL_DATA_TRAIN_Modified$OnDefense <- 
+  ifelse(
+    as.character(NFL_DATA_TRAIN_Modified$HomeTeamAbbr) == as.character(NFL_DATA_TRAIN_Modified$PossessionTeam),
+    as.character(NFL_DATA_TRAIN_Modified$VisitorTeamAbbr) , 
+    as.character(NFL_DATA_TRAIN_Modified$HomeTeamAbbr) 
+  )
+NFL_DATA_TRAIN_Modified$OnDefense = factor(NFL_DATA_TRAIN_Modified$OnDefense)
+
+# Add the age of the running player
+
+# Change the birth dates to strings
+NFL_DATA_TRAIN_Modified$PlayerBirthDate = as.character(NFL_DATA_TRAIN_Modified$PlayerBirthDate)
+# Grab the Year for each of the running player
+Birth_Year = str_sub(NFL_DATA_TRAIN_Modified$PlayerBirthDate, 7, 11)
+# Grab Month of each running player
+Birth_Month = str_sub(NFL_DATA_TRAIN_Modified$PlayerBirthDate, 1, 2)
+
+# If Born in July (07) Have lived 5/12 of a year. ie (12 - (Birth_Month)) / 12
+How_Much_Of_Year_Lived = (12 - as.numeric(Birth_Month)) / 12
+Years_Lived = NFL_DATA_TRAIN_Modified$Season - as.numeric(Birth_Year)
+Total_Years_Lived = Years_Lived + How_Much_Of_Year_Lived
+NFL_DATA_TRAIN_Modified$PlayerAge = Total_Years_Lived
+
+
+# Changes Game Clock to Seconds. Divide by 60 to get minutes then round and factor. Just Minutes
+NFL_DATA_TRAIN_Modified$GameClock = factor(round(((as.numeric(NFL_DATA_TRAIN_Modified$GameClock)) / 60), 0))
+NFL_DATA_TRAIN_Modified$GameClock = factor(NFL_DATA_TRAIN_Modified$GameClock)
+
+# MORE EXPLORATION WITH NEW COVARIATES
+
+# Offense Formation, Defensive_Team, Yards, Defenders in Box Color
+
+plot_ly(
+  NFL_DATA_TRAIN_Modified, x = ~OffenseFormation, y = ~OnDefense, z = ~Yards, color = ~DefendersInTheBox) %>%
+  add_markers() %>%
+  layout(
+    scene = list(xaxis = list(title = 'OffenseForm'),
+                 yaxis = list(title = 'OnDefense'),
+                 zaxis = list(title = 'Yards'))
+  )
+
+# Yards vs. Difference in Score, Color = Quarter
+ggplot(NFL_DATA_TRAIN_Modified, aes(x=HomeScoreAdvantage, y=Yards, color = Quarter )) +
+  geom_point(size=2, shape=23)
+# Difference in score spreads out depending on the quarter (makes sense)
+# Overtime looks to have highest average yards
+# 4th quarter more run plays
+
+# Time between handoff and yards, color = offense style 
+ggplot(NFL_DATA_TRAIN_Modified, aes(x=TimeDifference, y=Yards, color = OffenseFormation)) +
+  geom_point(size=2, shape=23)
+
+# GameClock, Quarter, Yards
+plot_ly(
+  NFL_DATA_TRAIN_Modified, x = ~GameClock, y = ~Quarter, z = ~Yards, color = ~DefendersInTheBox) %>%
+  add_markers() %>%
+  layout(
+    scene = list(xaxis = list(title = 'Game Clock'),
+                 yaxis = list(title = 'Quarter'),
+                 zaxis = list(title = 'Yards'))
+  )
+
+# SELECTION OF COVARIATES FOR ANALYSIS
 
 # Data we want
 # GameId, PlayId, Team, X, Y, NFLID, Quarter, GameClock, PossesionTeam
@@ -119,9 +221,106 @@ plot_ly(
 # OffenseFormation, OffensePersonel, DefendersinBox, DefensePersonel, 
 # Play direction, Yards, PlayerHeight, PlayerWeight, PlayerBirthDate, HomeTeamAbbr
 # AwayTeamAbbr, Week, StadiumType, Turf, GameWeather, Temperature, Humidity
+View(NFL_DATA_TRAIN_Modified)
+# Drop columns that are not important to df
+NFL_DATA_TRAIN_Filtered = select(NFL_DATA_TRAIN_Modified, 
+                                          -GameId, -PlayId, -Team, -S, -A, -Dis,
+                                          -Orientation, -Dir, -DisplayName, -JerseyNumber,
+                                          -YardLine, -FieldPosition, -HomeScoreBeforePlay,
+                                          -VisitorScoreBeforePlay, -NflId, -TimeHandoff,
+                                          -TimeSnap, -PlayerBirthDate, -PlayerCollegeName, -Location,
+                                          -WindSpeed, -WindDirection, -StadiumType, -Turf, -GameWeather) # Turf and stadium type all captured in stadium
+View(NFL_DATA_TRAIN_Filtered) # drop game weather, captured in Week, and Stadium. Also too many missing values
+
+# NEED TO DO MORE DATA CLEANING. How to Handle Missing Data. How to Handle Only 1 observations
+
+
+# Need to count how many NA / Empty cells there are for each column
+summary(NFL_DATA_TRAIN_Filtered)  # changed empty to NA when reading in file
+# GameWeather, Temperature, Humidy all have missing or NA data
+# sum(is.na(NFL_DATA_TRAIN_Filtered$GameWeather))
+# sum(NFL_DATA_TRAIN_Filtered$GameWeather == "")
+
+
+# Need to delete a row within a column if there is just 1 special case. (Ex. DefensivePersonnel) (reduces observations by 11)
+NFL_DATA_TRAIN_Filtered = NFL_DATA_TRAIN_Filtered[unsplit(table(NFL_DATA_TRAIN_Filtered$DefensePersonnel), NFL_DATA_TRAIN_Filtered$DefensePersonnel) >= 3, ]
+# Same for OffensePersonnel (reduces by 18 observations)
+NFL_DATA_TRAIN_Filtered = NFL_DATA_TRAIN_Filtered[unsplit(table(NFL_DATA_TRAIN_Filtered$OffensePersonnel), NFL_DATA_TRAIN_Filtered$OffensePersonnel) >= 3, ]
+
+# Factor the Downs
+NFL_DATA_TRAIN_Filtered$Down = factor(NFL_DATA_TRAIN_Filtered$Down)
+
+# Factor NFLIDRusher
+NFL_DATA_TRAIN_Filtered$NflIdRusher = factor(NFL_DATA_TRAIN_Filtered$NflIdRusher) 
+NFL_DATA_TRAIN_Filtered = NFL_DATA_TRAIN_Filtered[unsplit(table(NFL_DATA_TRAIN_Filtered$NflIdRusher), NFL_DATA_TRAIN_Filtered$NflIdRusher) >= 3, ]
+
+# Factor, height, stadium, position
+NFL_DATA_TRAIN_Filtered$PlayerHeight = factor(NFL_DATA_TRAIN_Filtered$PlayerHeight)
+NFL_DATA_TRAIN_Filtered$Stadium = factor(NFL_DATA_TRAIN_Filtered$Stadium)
+NFL_DATA_TRAIN_Filtered$Position = factor(NFL_DATA_TRAIN_Filtered$Position)
+
+# Need to remove NA Rows: Still 16,631 observations
+NFL_DATA_TRAIN_Filtered_Final <- na.omit(NFL_DATA_TRAIN_Filtered)
+View(NFL_DATA_TRAIN_Filtered_Final)
 
 
 
+# BASELINE ANALYSIS 
 
-  
-  
+NFL_Train_Total_Model = lm(Yards ~ ., data=NFL_DATA_TRAIN_Filtered_Final)
+NFL_Train_Total_Model
+RMSE_NFL = sqrt(mean((NFL_DATA_TRAIN_Filtered_Final$Yards - predict(NFL_Train_Total_Model, NFL_DATA_TRAIN_Filtered_Final)) ^ 2)) 
+RMSE_NFL # =  6.2419 yards 
+
+# What if we always predicted the mean of yards? (Just Intercept Term)
+NFL_Train_Total_Model1 = lm(Yards ~ 1, data=NFL_DATA_TRAIN_Filtered_Final)
+NFL_Train_Total_Model1
+RMSE_NFL1 = sqrt(mean((NFL_DATA_TRAIN_Filtered_Final$Yards - predict(NFL_Train_Total_Model1, NFL_DATA_TRAIN_Filtered_Final)) ^ 2)) 
+RMSE_NFL1 # =  6.4145 yards  (So what we currently have is a slight improvement)
+
+# Forward Stepwise Regression
+min_model = NFL_Train_Total_Model1
+max_model = NFL_Train_Total_Model
+stepwise_model = step(min_model, direction='forward', scope=max_model)
+summary(stepwise_model)
+# Ultimately, this is saying that the extra info we gain is not worth the complexity
+
+# Backward Stepwise Regerssion
+
+backward_step = step(max_model, direction='backward')
+backward_step # Best Model is Season, Distance, Defenders in Box, Temp, Humidity, and Homescore advantage
+RMSE_NFL_Backward = sqrt(mean((NFL_DATA_TRAIN_Filtered_Final$Yards - predict(backward_step, NFL_DATA_TRAIN_Filtered_Final)) ^ 2)) 
+RMSE_NFL_Backward #  = 6.3553
+
+# Lasso and Ridge Regression
+x = select(NFL_DATA_TRAIN_Filtered_Final, -Yards)
+y = NFL_DATA_TRAIN_Filtered_Final$Yards
+ridge_mod = glmnet(x, y, alpha = 0)
+
+# THROW AWAY CODE 
+# levels(NFL_DATA_TRAIN_Old_Covariates$DefensePersonnel)
+
+# NFL_Train_Total_Model.cv = cvFit(NFL_Train_Total_Model, data=NFL_DATA_TRAIN_Old_Covariates,
+                                 # y=NFL_DATA_TRAIN_Old_Covariates$Yards, K=10, seed=1)
+# NFL_Train_Total_Model.cv
+
+# BASELINE ANALYSIS
+
+# Using all Covariates included the original NFL_Train, not using the 4 covariates we created
+NFL_DATA_TRAIN_Old_Covariates = select(NFL_DATA_TRAIN_Complete_Modified,
+                                       -TimeDifference, -HomeScoreAdvantage,
+                                       -OnDefense, -PlayerAge,
+                                       -StadiumType, -GameWeather) 
+# Want to include offense peronsell
+
+
+
+# Only 1 Row with 1 special type of defensive personnel, so deleting it
+# pi <- NFL_DATA_TRAIN_Old_Covariates %>%
+#   group_by(GameWeather)  %>%
+#   summarise(
+#     count = n()
+#   )
+# View(pi)
+
+# Want distance squared
